@@ -117,6 +117,9 @@ class _ControllerScreenState extends State<ControllerScreen>
   double _filteredYaw = 0;
   double _filteredPitch = 0;
 
+  // Shared gate used by camera touchpad, zoom controls, and shortcut buttons.
+  bool get _inputEnabled => _connected && _armed;
+
   @override
   void initState() {
     super.initState();
