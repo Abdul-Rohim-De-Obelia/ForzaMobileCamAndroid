@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,7 +19,7 @@ const Color muted = Color(0xFF9DAFC7);
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations(
-    const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+    const [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown],
   );
   runApp(const ForzaMobileCamApp());
 }
@@ -100,7 +99,6 @@ class _ControllerScreenState extends State<ControllerScreen>
   bool _invertY = false;
   String _connectionText = 'DISCONNECTED';
   String _activeWindow = 'Belum terhubung';
-  String _mode = 'PHOTO';
   String _gyroMessage = 'Gyro nonaktif';
   double _mouseSensitivity = 1.0;
   double _gyroSensitivity = 1.5;
@@ -112,6 +110,12 @@ class _ControllerScreenState extends State<ControllerScreen>
   DateTime? _lastGyroTime;
   final Set<String> _heldKeys = <String>{};
   final Set<String> _movementKeys = <String>{};
+  final Set<String> _gyroKeys = <String>{};
+  String _cameraMode = 'COCKPIT'; // COCKPIT, PHOTO MOUSE, PHOTO KEYS
+  bool _gyroMouseHeld = false;
+  bool _touchMouseHeld = false;
+  double _filteredYaw = 0;
+  double _filteredPitch = 0;
 
   @override
   void initState() {
@@ -316,11 +320,15 @@ class _ControllerScreenState extends State<ControllerScreen>
 
   void _emergencyStop() {
     if (_connected) _send({'cmd': 'emergency_stop'});
+    _stopGyro(releaseInputs: false);
     if (mounted) {
       setState(() {
         _armed = false;
         _heldKeys.clear();
         _movementKeys.clear();
+        _gyroKeys.clear();
+        _gyroMouseHeld = false;
+        _touchMouseHeld = false;
       });
     }
   }
@@ -396,10 +404,20 @@ class _ControllerScreenState extends State<ControllerScreen>
   Future<void> _toggleGyro(bool enabled) async {
     if (enabled) {
       if (!_connected || !_armed) {
-        _showMessage('Hubungkan Bridge dan tekan ARM sebelum mengaktifkan gyro.');
+        _showMessage('Hubungkan Bridge dan tekan ARM sebelum mengaktifkan motion camera.');
         return;
       }
       try {
+        _filteredYaw = 0;
+        _filteredPitch = 0;
+        _lastGyroTime = null;
+
+        // FH6 Cockpit Mouse Free Look requires RMB to remain held while mouse moves.
+        if (_cameraMode == 'COCKPIT') {
+          _mouseButtonDown('right');
+          _gyroMouseHeld = true;
+        }
+
         _gyroSub = gyroscopeEventStream(
           samplingPeriod: SensorInterval.gameInterval,
         ).listen(
@@ -411,10 +429,13 @@ class _ControllerScreenState extends State<ControllerScreen>
         );
         setState(() {
           _gyroEnabled = true;
-          _gyroMessage = 'Gyro aktif · tahan HP stabil lalu kalibrasi';
-          _lastGyroTime = null;
+          _gyroMessage = 'Motion aktif · putar HP perlahan';
         });
       } catch (error) {
+        if (_gyroMouseHeld) {
+          _mouseButtonUp('right');
+          _gyroMouseHeld = false;
+        }
         _showMessage('Gagal mengaktifkan gyro: $error');
       }
     } else {
@@ -422,17 +443,76 @@ class _ControllerScreenState extends State<ControllerScreen>
     }
   }
 
-  void _stopGyro() {
+  void _stopGyro({bool releaseInputs = true}) {
     _gyroSub?.cancel();
     _gyroSub = null;
+    if (releaseInputs && _connected && _armed) {
+      if (_gyroMouseHeld) _mouseButtonUp('right');
+      for (final key in _gyroKeys.toList()) {
+        _keyUp(key);
+      }
+    }
+    _gyroMouseHeld = false;
+    _gyroKeys.clear();
     if (mounted) {
       setState(() {
         _gyroEnabled = false;
         _calibrating = false;
         _lastGyroTime = null;
-        _gyroMessage = 'Gyro nonaktif';
+        _gyroMessage = 'Motion control nonaktif';
       });
     }
+  }
+
+  void _syncGyroKeys(Set<String> next) {
+    final released = _gyroKeys.difference(next).toList();
+    final pressed = next.difference(_gyroKeys).toList();
+    for (final key in released) {
+      _keyUp(key);
+    }
+    for (final key in pressed) {
+      _keyDown(key);
+    }
+    _gyroKeys
+      ..clear()
+      ..addAll(next);
+  }
+
+  double _applyDeadzone(double value, double zone) {
+    if (value.abs() < zone) return 0;
+    return value.sign * (value.abs() - zone);
+  }
+
+  void _setCameraMode(String mode) {
+    if (_cameraMode == mode) return;
+    if (_gyroMouseHeld && _connected && _armed) {
+      _mouseButtonUp('right');
+      _gyroMouseHeld = false;
+    }
+    _syncGyroKeys(<String>{});
+    setState(() => _cameraMode = mode);
+    if (_gyroEnabled && _connected && _armed &&
+        (mode == 'COCKPIT')) {
+      _mouseButtonDown('right');
+      _gyroMouseHeld = true;
+    }
+  }
+
+  void _cameraGestureStart(int pointerCount) {
+    if (!_connected || !_armed) return;
+    if (pointerCount == 1 && _cameraMode == 'COCKPIT' && !_gyroMouseHeld) {
+      _mouseButtonDown('right');
+      _touchMouseHeld = true;
+    }
+  }
+
+  void _cameraGestureEnd() {
+    if (_touchMouseHeld && _connected && _armed) _mouseButtonUp('right');
+    _touchMouseHeld = false;
+  }
+
+  void _onPinchZoom(int direction) {
+    if (_connected && _armed) _mouseWheel(direction * 120);
   }
 
   void _startCalibration() {
@@ -458,13 +538,13 @@ class _ControllerScreenState extends State<ControllerScreen>
       _gyroSumX += event.x;
       _gyroSumY += event.y;
       _gyroSamples++;
-      if (_gyroSamples >= 60) {
+      if (_gyroSamples >= 70) {
         _gyroBiasX = _gyroSumX / _gyroSamples;
         _gyroBiasY = _gyroSumY / _gyroSamples;
         if (mounted) {
           setState(() {
             _calibrating = false;
-            _gyroMessage = 'Kalibrasi selesai';
+            _gyroMessage = 'Center tersimpan · siap digunakan';
           });
         }
       }
@@ -475,16 +555,36 @@ class _ControllerScreenState extends State<ControllerScreen>
     final dt = now.difference(previous).inMicroseconds / 1000000.0;
     if (dt <= 0 || dt > 0.08) return;
 
-    // Landscape mapping: device X/Y angular velocity is converted to relative mouse movement.
-    final yaw = (event.x - _gyroBiasX) * (_invertX ? -1 : 1);
-    final pitch = (event.y - _gyroBiasY) * (_invertY ? -1 : 1);
-    final dx = yaw * dt * 260 * _gyroSensitivity;
-    final dy = -pitch * dt * 260 * _gyroSensitivity;
-    final ix = dx.round().clamp(-120, 120);
-    final iy = dy.round().clamp(-120, 120);
+    // Portrait mapping: phone yaw (Y axis) pans left/right; pitch (X axis) pans up/down.
+    var yaw = (event.y - _gyroBiasY) * (_invertX ? -1 : 1);
+    var pitch = (event.x - _gyroBiasX) * (_invertY ? -1 : 1);
+    yaw = _applyDeadzone(yaw, 0.018);
+    pitch = _applyDeadzone(pitch, 0.018);
 
-    if (ix != 0 || iy != 0) {
-      _send({'cmd': 'mouse_move', 'dx': ix, 'dy': iy});
+    // Light low-pass filter removes sensor jitter while preserving responsive movement.
+    _filteredYaw = (_filteredYaw * 0.58) + (yaw * 0.42);
+    _filteredPitch = (_filteredPitch * 0.58) + (pitch * 0.42);
+
+    if (_cameraMode == 'PHOTO KEYS') {
+      const threshold = 0.045;
+      final next = <String>{};
+      if (_filteredYaw < -threshold) next.add('LEFT');
+      if (_filteredYaw > threshold) next.add('RIGHT');
+      if (_filteredPitch < -threshold) next.add('UP');
+      if (_filteredPitch > threshold) next.add('DOWN');
+      _syncGyroKeys(next);
+      return;
+    }
+
+    // Mouse Free Look: the app holds RMB automatically in Cockpit mode.
+    final dx = (_filteredYaw * dt * 520 * _gyroSensitivity).round();
+    final dy = (-_filteredPitch * dt * 520 * _gyroSensitivity).round();
+    if (dx != 0 || dy != 0) {
+      _send({
+        'cmd': 'mouse_move',
+        'dx': dx.clamp(-120, 120),
+        'dy': dy.clamp(-120, 120),
+      });
     }
   }
 
@@ -526,436 +626,317 @@ class _ControllerScreenState extends State<ControllerScreen>
 
   @override
   Widget build(BuildContext context) {
-    final inputEnabled = _connected && _armed;
-
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            children: [
-              _buildHeader(),
-              const SizedBox(height: 10),
-              Expanded(
-                child: Row(
+        child: Column(
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(15, 8, 15, 18),
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Expanded(flex: 10, child: _buildMovementPanel(inputEnabled)),
-                    const SizedBox(width: 10),
-                    Expanded(flex: 12, child: _buildCameraPanel(inputEnabled)),
-                    const SizedBox(width: 10),
-                    Expanded(flex: 8, child: _buildActionsPanel(inputEnabled)),
+                    _buildConnectionStrip(),
+                    const SizedBox(height: 13),
+                    _buildModeSelector(),
+                    const SizedBox(height: 12),
+                    _buildViewfinder(),
+                    const SizedBox(height: 10),
+                    _buildZoomBar(),
+                    const SizedBox(height: 12),
+                    _buildMotionPanel(),
+                    const SizedBox(height: 12),
+                    _buildQuickActions(),
+                    const SizedBox(height: 12),
+                    _buildFooter(),
                   ],
                 ),
               ),
-              const SizedBox(height: 7),
-              _buildFooter(),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   Widget _buildHeader() {
-    final isConnected = _connected;
-    final statusColor = _armed ? green : (isConnected ? accent : red);
-
-    return Row(
-      children: [
-        Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            color: const Color(0xFF173657),
-            borderRadius: BorderRadius.circular(11),
+    final statusColor = _armed ? green : (_connected ? accent : muted);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 7),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: const Color(0xFF173657),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(Icons.camera_alt_rounded, color: Colors.white),
           ),
-          child: const Icon(Icons.camera_alt_rounded, color: Colors.white),
-        ),
-        const SizedBox(width: 9),
-        const Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'FORZA MOBILE CAM',
-                style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.2),
-              ),
-              Text(
-                'WIRELESS CAMERA CONTROLLER · STAGE 2',
-                style: TextStyle(fontSize: 9, color: muted, letterSpacing: .7),
-              ),
-            ],
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('FORZA MOBILE CAM', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, letterSpacing: .8)),
+                SizedBox(height: 2),
+                Text('VIRTUAL CAMERA RIG', style: TextStyle(fontSize: 9, color: muted, letterSpacing: 1.4)),
+              ],
+            ),
           ),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: statusColor.withOpacity(.12),
-            border: Border.all(color: statusColor.withOpacity(.55)),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
-              ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+            decoration: BoxDecoration(
+              color: statusColor.withOpacity(.10),
+              border: Border.all(color: statusColor.withOpacity(.5)),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(children: [
+              Container(width: 6, height: 6, decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle)),
               const SizedBox(width: 6),
-              Text(
-                _connectionText,
-                style: TextStyle(
-                  color: statusColor,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
+              Text(_connectionText, style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.bold)),
+            ]),
           ),
-        ),
-        const SizedBox(width: 8),
-        OutlinedButton.icon(
-          onPressed: _connecting
-              ? null
-              : (isConnected ? () => _disconnect() : _showConnectionDialog),
-          icon: Icon(isConnected ? Icons.link_off : Icons.link, size: 16),
-          label: Text(isConnected ? 'DISCONNECT' : 'CONNECT'),
-        ),
-        const SizedBox(width: 6),
-        FilledButton.icon(
-          onPressed: isConnected && !_armed ? _arm : null,
-          style: FilledButton.styleFrom(backgroundColor: const Color(0xFF176344)),
-          icon: const Icon(Icons.power_settings_new, size: 16),
-          label: const Text('ARM'),
-        ),
-        const SizedBox(width: 6),
-        FilledButton.icon(
-          onPressed: isConnected ? _emergencyStop : null,
-          style: FilledButton.styleFrom(backgroundColor: const Color(0xFF8A2934)),
-          icon: const Icon(Icons.stop_circle_outlined, size: 16),
-          label: const Text('STOP'),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _card({required Widget child, EdgeInsets padding = const EdgeInsets.all(12)}) {
+  Widget _card({required Widget child, EdgeInsets padding = const EdgeInsets.all(13)}) {
     return Container(
       padding: padding,
       decoration: BoxDecoration(
         color: panel,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(17),
         border: Border.all(color: line),
       ),
       child: child,
     );
   }
 
-  Widget _sectionTitle(String title, {String? trailing}) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            title,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-              letterSpacing: .7,
-            ),
-          ),
-        ),
-        if (trailing != null)
-          Text(trailing, style: const TextStyle(color: muted, fontSize: 10)),
-      ],
-    );
-  }
-
-  Widget _buildMovementPanel(bool inputEnabled) {
+  Widget _buildConnectionStrip() {
     return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+      child: Row(
         children: [
-          _sectionTitle('MOVEMENT', trailing: 'WASD'),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 5,
-            children: [
-              _modeChip('PHOTO'),
-              _modeChip('COCKPIT'),
-              _modeChip('DRONE'),
-            ],
-          ),
-          const SizedBox(height: 7),
-          Expanded(
-            child: Center(
-              child: AnalogJoystick(
-                enabled: inputEnabled,
-                onChanged: _updateMovement,
-                size: 164,
-              ),
+          const Icon(Icons.desktop_windows, color: muted, size: 16),
+          const SizedBox(width: 7),
+          Expanded(child: Text(_activeWindow, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: muted, fontSize: 9))),
+          if (!_connected)
+            _miniButton(_connecting ? 'WAIT' : 'CONNECT', Icons.link, _connecting ? null : _showConnectionDialog, accent)
+          else if (!_armed)
+            _miniButton('ARM', Icons.power_settings_new, _arm, green)
+          else
+            _miniButton('STOP', Icons.stop_circle_outlined, _emergencyStop, red),
+          if (_connected)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Disconnect',
+              onPressed: _disconnect,
+              icon: const Icon(Icons.link_off, color: muted, size: 17),
             ),
-          ),
-          const Text(
-            'LEFT STICK · MOVE CAMERA',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: muted, fontSize: 9, letterSpacing: .8),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: HoldButton(
-                  label: 'E  UP',
-                  icon: Icons.keyboard_arrow_up,
-                  enabled: inputEnabled,
-                  onDown: () => _keyDown('E'),
-                  onUp: () => _keyUp('E'),
-                ),
-              ),
-              const SizedBox(width: 7),
-              Expanded(
-                child: HoldButton(
-                  label: 'Q  DOWN',
-                  icon: Icons.keyboard_arrow_down,
-                  enabled: inputEnabled,
-                  onDown: () => _keyDown('Q'),
-                  onUp: () => _keyUp('Q'),
-                ),
-              ),
-            ],
-          ),
         ],
       ),
     );
   }
 
-  Widget _modeChip(String mode) {
-    final selected = _mode == mode;
-    return ChoiceChip(
-      label: Text(mode, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
-      selected: selected,
-      visualDensity: VisualDensity.compact,
-      onSelected: (_) => setState(() => _mode = mode),
-      selectedColor: const Color(0xFF1D5A91),
-      backgroundColor: bg,
-      side: BorderSide(color: selected ? accent : line),
-      labelStyle: TextStyle(color: selected ? Colors.white : muted),
-    );
-  }
-
-  Widget _buildCameraPanel(bool inputEnabled) {
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _sectionTitle('CAMERA LOOK', trailing: 'MOUSE RELATIVE'),
-          const SizedBox(height: 8),
-          Expanded(
-            child: CameraTouchpad(
-              enabled: inputEnabled,
-              onDelta: _mouseMove,
-            ),
-          ),
-          const SizedBox(height: 7),
-          Row(
-            children: [
-              const Icon(Icons.tune, size: 15, color: muted),
-              const SizedBox(width: 6),
-              const Text('Mouse sensitivity', style: TextStyle(fontSize: 10, color: muted)),
-              Expanded(
-                child: Slider(
-                  value: _mouseSensitivity,
-                  min: .25,
-                  max: 3,
-                  divisions: 11,
-                  onChanged: (v) => setState(() => _mouseSensitivity = v),
-                ),
-              ),
-              SizedBox(
-                width: 32,
-                child: Text('${_mouseSensitivity.toStringAsFixed(1)}x',
-                    style: const TextStyle(fontSize: 10, color: muted)),
-              ),
-            ],
-          ),
-          const Divider(color: line, height: 10),
-          Row(
-            children: [
-              const Icon(Icons.screen_rotation_alt, size: 17, color: accent),
-              const SizedBox(width: 6),
-              const Expanded(
-                child: Text('GYROSCOPE', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-              ),
-              Switch.adaptive(
-                value: _gyroEnabled,
-                activeColor: green,
-                onChanged: _toggleGyro,
-              ),
-              IconButton(
-                tooltip: 'Calibrate gyro',
-                onPressed: _gyroEnabled ? _startCalibration : null,
-                icon: const Icon(Icons.center_focus_strong, size: 19),
-              ),
-            ],
-          ),
-          Row(
-            children: [
-              Expanded(
-                child: Text(_gyroMessage, style: const TextStyle(color: muted, fontSize: 9)),
-              ),
-              TextButton(
-                onPressed: _gyroEnabled ? () => setState(() => _invertX = !_invertX) : null,
-                child: Text('INV X ${_invertX ? "ON" : "OFF"}', style: const TextStyle(fontSize: 9)),
-              ),
-              TextButton(
-                onPressed: _gyroEnabled ? () => setState(() => _invertY = !_invertY) : null,
-                child: Text('INV Y ${_invertY ? "ON" : "OFF"}', style: const TextStyle(fontSize: 9)),
-              ),
-            ],
-          ),
-          Row(
-            children: [
-              const Text('Gyro gain', style: TextStyle(color: muted, fontSize: 9)),
-              Expanded(
-                child: Slider(
-                  value: _gyroSensitivity,
-                  min: .3,
-                  max: 4,
-                  divisions: 18,
-                  onChanged: (v) => setState(() => _gyroSensitivity = v),
-                ),
-              ),
-              SizedBox(
-                width: 30,
-                child: Text('${_gyroSensitivity.toStringAsFixed(1)}x',
-                    style: const TextStyle(color: muted, fontSize: 9)),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionsPanel(bool inputEnabled) {
-    return _card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _sectionTitle('QUICK ACTIONS'),
-          const SizedBox(height: 9),
-          _actionButton('OPEN PHOTO MODE', Icons.camera, inputEnabled, () => _keyTap('P')),
-          const SizedBox(height: 6),
-          _actionButton('RESET / RECENTER', Icons.center_focus_weak, inputEnabled, () => _keyTap('R')),
-          const SizedBox(height: 6),
-          _actionButton('CAPTURE PHOTO', Icons.photo_camera, inputEnabled, () => _keyTap('ENTER')),
-          const SizedBox(height: 6),
-          _actionButton('HIDE / SHOW UI', Icons.visibility_off, inputEnabled, () => _keyTap('F1')),
-          const SizedBox(height: 6),
-          _actionButton('EXIT MODE', Icons.close, inputEnabled, () => _keyTap('ESC')),
-          const Divider(color: line, height: 18),
-          _sectionTitle('ZOOM'),
-          const SizedBox(height: 7),
-          Row(
-            children: [
-              Expanded(
-                child: _roundAction(
-                  icon: Icons.remove,
-                  label: 'OUT',
-                  enabled: inputEnabled,
-                  onTap: () => _mouseWheel(-120),
-                ),
-              ),
-              const SizedBox(width: 7),
-              Expanded(
-                child: _roundAction(
-                  icon: Icons.add,
-                  label: 'IN',
-                  enabled: inputEnabled,
-                  onTap: () => _mouseWheel(120),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 9),
-          HoldButton(
-            label: 'HOLD SHIFT · SLOW',
-            icon: Icons.slow_motion_video,
-            enabled: inputEnabled,
-            onDown: () => _keyDown('SHIFT'),
-            onUp: () => _keyUp('SHIFT'),
-          ),
-          const SizedBox(height: 7),
-          HoldButton(
-            label: 'HOLD RIGHT MOUSE',
-            icon: Icons.mouse,
-            enabled: inputEnabled,
-            onDown: () => _mouseButtonDown('right'),
-            onUp: () => _mouseButtonUp('right'),
-          ),
-          const Spacer(),
-          Container(
-            padding: const EdgeInsets.all(9),
-            decoration: BoxDecoration(
-              color: bg,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: line),
-            ),
-            child: Text(
-              _mode == 'PHOTO'
-                  ? 'Photo Mode: aktifkan mode kamera di game, lalu gunakan joystick dan touchpad.'
-                  : _mode == 'COCKPIT'
-                      ? 'Cockpit: aktifkan Mouse Free Look di game. Gyro dapat digunakan untuk look-around.'
-                      : 'Drone: aktifkan Drone Mode di game terlebih dahulu. Mapping perlu diuji pada instalasi kamu.',
-              style: const TextStyle(color: muted, fontSize: 9, height: 1.35),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actionButton(
-    String label,
-    IconData icon,
-    bool enabled,
-    VoidCallback onTap,
-  ) {
+  Widget _miniButton(String label, IconData icon, VoidCallback? action, Color color) {
     return SizedBox(
-      height: 39,
-      child: OutlinedButton.icon(
-        onPressed: enabled ? onTap : null,
-        icon: Icon(icon, size: 15),
-        label: Text(label, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
-        style: OutlinedButton.styleFrom(
-          alignment: Alignment.centerLeft,
+      height: 33,
+      child: FilledButton.icon(
+        onPressed: action,
+        icon: Icon(icon, size: 13),
+        label: Text(label, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800)),
+        style: FilledButton.styleFrom(
+          backgroundColor: color.withOpacity(.16),
+          foregroundColor: color,
           padding: const EdgeInsets.symmetric(horizontal: 9),
-          side: const BorderSide(color: line),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
         ),
       ),
     );
   }
 
-  Widget _roundAction({
-    required IconData icon,
-    required String label,
-    required bool enabled,
-    required VoidCallback onTap,
-  }) {
-    return OutlinedButton(
-      onPressed: enabled ? onTap : null,
-      style: OutlinedButton.styleFrom(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        side: const BorderSide(color: line),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ),
-      child: Column(
+  Widget _buildModeSelector() {
+    return _card(
+      padding: const EdgeInsets.all(5),
+      child: Row(
         children: [
-          Icon(icon, size: 17),
-          Text(label, style: const TextStyle(fontSize: 9)),
+          _modeTab('COCKPIT', 'Cockpit', Icons.directions_car_filled_outlined),
+          _modeTab('PHOTO MOUSE', 'Photo · Mouse', Icons.camera_alt_outlined),
+          _modeTab('PHOTO KEYS', 'Photo · Keys', Icons.keyboard_alt_outlined),
         ],
+      ),
+    );
+  }
+
+  Widget _modeTab(String value, String label, IconData icon) {
+    final selected = _cameraMode == value;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => _setCameraMode(value),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 2),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF214D75) : Colors.transparent,
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(color: selected ? accent.withOpacity(.7) : Colors.transparent),
+          ),
+          child: Column(children: [
+            Icon(icon, size: 17, color: selected ? Colors.white : muted),
+            const SizedBox(height: 4),
+            Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 8, fontWeight: FontWeight.w800, color: selected ? Colors.white : muted)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildViewfinder() {
+    final enabled = _connected && _armed;
+    final modeLabel = _cameraMode == 'COCKPIT' ? 'COCKPIT FREE LOOK' : _cameraMode == 'PHOTO KEYS' ? 'PHOTO MODE · ARROW INPUT' : 'PHOTO MODE · MOUSE INPUT';
+    return _card(
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            const Icon(Icons.crop_free, color: accent, size: 15),
+            const SizedBox(width: 7),
+            Expanded(child: Text(modeLabel, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .7))),
+            Text(enabled ? 'CONTROL READY' : 'DISARMED', style: TextStyle(color: enabled ? green : muted, fontSize: 8, fontWeight: FontWeight.bold)),
+          ]),
+          const SizedBox(height: 9),
+          CameraTouchpad(
+            enabled: enabled,
+            onStart: _cameraGestureStart,
+            onEnd: _cameraGestureEnd,
+            onPan: _mouseMove,
+            onPinch: _onPinchZoom,
+          ),
+          const SizedBox(height: 8),
+          const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(Icons.touch_app_outlined, size: 13, color: muted),
+            SizedBox(width: 5),
+            Text('1 jari: arah kamera     2 jari: zoom', style: TextStyle(color: muted, fontSize: 9)),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildZoomBar() {
+    return _card(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      child: Row(children: [
+        const Icon(Icons.zoom_out, color: muted, size: 18),
+        const SizedBox(width: 7),
+        const Expanded(child: Text('PINCH TO ZOOM', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .8))),
+        IconButton(visualDensity: VisualDensity.compact, onPressed: _inputEnabled ? () => _mouseWheel(-120) : null, icon: const Icon(Icons.remove_circle_outline, size: 21)),
+        IconButton(visualDensity: VisualDensity.compact, onPressed: _inputEnabled ? () => _mouseWheel(120) : null, icon: const Icon(Icons.add_circle_outline, size: 21)),
+      ]),
+    );
+  }
+
+  Widget _buildMotionPanel() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            Container(
+              width: 34, height: 34,
+              decoration: BoxDecoration(color: const Color(0xFF183653), borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.screen_rotation_alt, color: accent, size: 18),
+            ),
+            const SizedBox(width: 9),
+            const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('PHONE MOTION', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
+              SizedBox(height: 2),
+              Text('Putar HP untuk mengarahkan kamera game', style: TextStyle(color: muted, fontSize: 9)),
+            ])),
+            Switch.adaptive(value: _gyroEnabled, activeColor: green, onChanged: _toggleGyro),
+          ]),
+          const SizedBox(height: 5),
+          Row(children: [
+            Expanded(child: Text(_gyroMessage, style: TextStyle(color: _calibrating ? accent : muted, fontSize: 9))),
+            OutlinedButton.icon(
+              onPressed: _gyroEnabled ? _startCalibration : null,
+              icon: const Icon(Icons.center_focus_strong, size: 13),
+              label: const Text('RECENTER', style: TextStyle(fontSize: 8, fontWeight: FontWeight.bold)),
+              style: OutlinedButton.styleFrom(foregroundColor: accent, side: const BorderSide(color: line), padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6)),
+            ),
+          ]),
+          const SizedBox(height: 5),
+          Row(children: [
+            const Text('SENSITIVITY', style: TextStyle(color: muted, fontSize: 8, fontWeight: FontWeight.bold)),
+            Expanded(child: Slider(value: _gyroSensitivity, min: .4, max: 4, divisions: 18, onChanged: (v) => setState(() => _gyroSensitivity = v))),
+            SizedBox(width: 31, child: Text('${_gyroSensitivity.toStringAsFixed(1)}x', textAlign: TextAlign.end, style: const TextStyle(color: muted, fontSize: 9))),
+          ]),
+          if (_cameraMode == 'COCKPIT')
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(color: const Color(0xFF10271F), borderRadius: BorderRadius.circular(9), border: Border.all(color: const Color(0xFF24543F))),
+              child: const Row(children: [
+                Icon(Icons.mouse, color: green, size: 14),
+                SizedBox(width: 7),
+                Expanded(child: Text('Cockpit: Right Mouse Button ditahan otomatis selama motion control aktif.', style: TextStyle(color: Color(0xFFB7EAD4), fontSize: 8, height: 1.3))),
+              ]),
+            ),
+          if (_cameraMode == 'PHOTO KEYS')
+            const Text('Photo Keys: gerakan HP diterjemahkan menjadi tombol panah. Responsnya bertahap, bukan analog.', style: TextStyle(color: muted, fontSize: 8, height: 1.3)),
+          const SizedBox(height: 6),
+          Row(children: [
+            _invertButton('INVERT X', _invertX, () => setState(() => _invertX = !_invertX)),
+            const SizedBox(width: 7),
+            _invertButton('INVERT Y', _invertY, () => setState(() => _invertY = !_invertY)),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _invertButton(String label, bool active, VoidCallback action) {
+    return Expanded(child: OutlinedButton(
+      onPressed: action,
+      style: OutlinedButton.styleFrom(foregroundColor: active ? accent : muted, side: BorderSide(color: active ? accent : line), padding: const EdgeInsets.symmetric(vertical: 6)),
+      child: Text('$label ${active ? "ON" : "OFF"}', style: const TextStyle(fontSize: 8)),
+    ));
+  }
+
+  Widget _buildQuickActions() {
+    return _card(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        const Text('CAMERA SHORTCUTS', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .8)),
+        const SizedBox(height: 9),
+        Row(children: [
+          Expanded(child: _actionTile('PHOTO MODE', Icons.camera_alt, 'P')),
+          const SizedBox(width: 7),
+          Expanded(child: _actionTile('RECENTER', Icons.center_focus_weak, 'R')),
+        ]),
+        const SizedBox(height: 7),
+        Row(children: [
+          Expanded(child: _actionTile('CAPTURE', Icons.photo_camera, 'ENTER')),
+          const SizedBox(width: 7),
+          Expanded(child: _actionTile('HIDE UI', Icons.visibility_off, 'F1')),
+        ]),
+        const SizedBox(height: 7),
+        _actionTile('EXIT CAMERA MODE', Icons.close, 'ESC'),
+      ]),
+    );
+  }
+
+  Widget _actionTile(String label, IconData icon, String key) {
+    return SizedBox(
+      height: 40,
+      child: OutlinedButton.icon(
+        onPressed: _inputEnabled ? () => _keyTap(key) : null,
+        icon: Icon(icon, size: 14),
+        label: Text(label, style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold)),
+        style: OutlinedButton.styleFrom(alignment: Alignment.centerLeft, foregroundColor: Colors.white, side: const BorderSide(color: line), padding: const EdgeInsets.symmetric(horizontal: 8), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
       ),
     );
   }
@@ -974,7 +955,7 @@ class _ControllerScreenState extends State<ControllerScreen>
           ),
         ),
         Text(
-          _armed ? 'INPUT ENABLED' : 'INPUT DISARMED',
+          _armed ? 'CAMERA ACTIVE' : 'SAFE MODE',
           style: TextStyle(
             color: _armed ? green : muted,
             fontSize: 9,
@@ -1205,157 +1186,118 @@ class _BridgeConnectionPageState extends State<BridgeConnectionPage> {
   }
 }
 
-class AnalogJoystick extends StatefulWidget {
-  const AnalogJoystick({
-    super.key,
-    required this.enabled,
-    required this.onChanged,
-    this.size = 160,
-  });
-
-  final bool enabled;
-  final ValueChanged<Offset> onChanged;
-  final double size;
-
-  @override
-  State<AnalogJoystick> createState() => _AnalogJoystickState();
-}
-
-class _AnalogJoystickState extends State<AnalogJoystick> {
-  Offset _value = Offset.zero;
-
-  void _update(Offset local, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final delta = local - center;
-    final maxRadius = math.min(size.width, size.height) * .36;
-    final distance = delta.distance;
-    final clamped = distance > maxRadius
-        ? delta / distance * maxRadius
-        : delta;
-    setState(() => _value = clamped / maxRadius);
-    widget.onChanged(_value);
-  }
-
-  void _reset() {
-    setState(() => _value = Offset.zero);
-    widget.onChanged(Offset.zero);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Opacity(
-      opacity: widget.enabled ? 1 : .4,
-      child: SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: LayoutBuilder(
-          builder: (context, constraints) => GestureDetector(
-            onPanStart: widget.enabled
-                ? (details) => _update(details.localPosition, constraints.biggest)
-                : null,
-            onPanUpdate: widget.enabled
-                ? (details) => _update(details.localPosition, constraints.biggest)
-                : null,
-            onPanEnd: widget.enabled ? (_) => _reset() : null,
-            onPanCancel: widget.enabled ? _reset : null,
-            child: CustomPaint(
-              painter: JoystickPainter(value: _value),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class JoystickPainter extends CustomPainter {
-  JoystickPainter({required this.value});
-  final Offset value;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) * .44;
-    final outer = Paint()..color = const Color(0xFF1B2B41);
-    final border = Paint()
-      ..color = const Color(0xFF49617F)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-    final guide = Paint()
-      ..color = const Color(0xFF31455F)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    canvas.drawCircle(center, radius, outer);
-    canvas.drawCircle(center, radius, border);
-    canvas.drawCircle(center, radius * .66, guide);
-    canvas.drawLine(Offset(center.dx - radius, center.dy),
-        Offset(center.dx + radius, center.dy), guide);
-    canvas.drawLine(Offset(center.dx, center.dy - radius),
-        Offset(center.dx, center.dy + radius), guide);
-
-    final knobCenter = center + value * radius * .72;
-    final knobPaint = Paint()..color = accent;
-    final knobShadow = Paint()..color = Colors.black.withOpacity(.35);
-    canvas.drawCircle(knobCenter.translate(0, 3), radius * .31, knobShadow);
-    canvas.drawCircle(knobCenter, radius * .30, knobPaint);
-    canvas.drawCircle(
-      knobCenter,
-      radius * .30,
-      Paint()
-        ..color = const Color(0xFFB9DCFF)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant JoystickPainter oldDelegate) =>
-      oldDelegate.value != value;
-}
-
-class CameraTouchpad extends StatelessWidget {
+class CameraTouchpad extends StatefulWidget {
   const CameraTouchpad({
     super.key,
     required this.enabled,
-    required this.onDelta,
+    required this.onStart,
+    required this.onEnd,
+    required this.onPan,
+    required this.onPinch,
   });
 
   final bool enabled;
-  final void Function(double dx, double dy) onDelta;
+  final ValueChanged<int> onStart;
+  final VoidCallback onEnd;
+  final void Function(double dx, double dy) onPan;
+  final ValueChanged<int> onPinch;
+
+  @override
+  State<CameraTouchpad> createState() => _CameraTouchpadState();
+}
+
+class _CameraTouchpadState extends State<CameraTouchpad> {
+  double _lastScale = 1.0;
+  double _pinchAccumulator = 0;
 
   @override
   Widget build(BuildContext context) {
     return Opacity(
-      opacity: enabled ? 1 : .4,
-      child: GestureDetector(
-        onPanUpdate: enabled
-            ? (details) => onDelta(details.delta.dx * 2.0, details.delta.dy * 2.0)
-            : null,
-        child: Container(
-          width: double.infinity,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(13),
-            border: Border.all(color: const Color(0xFF536D8C), style: BorderStyle.solid),
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF14243A), Color(0xFF0D1726)],
+      opacity: widget.enabled ? 1 : .42,
+      child: AspectRatio(
+        aspectRatio: 1.0,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(13),
+          child: GestureDetector(
+            onScaleStart: widget.enabled ? (details) {
+              _lastScale = 1.0;
+              _pinchAccumulator = 0;
+              widget.onStart(details.pointerCount);
+            } : null,
+            onScaleUpdate: widget.enabled ? (details) {
+              if (details.pointerCount >= 2) {
+                _pinchAccumulator += details.scale - _lastScale;
+                while (_pinchAccumulator >= .045) {
+                  widget.onPinch(1);
+                  _pinchAccumulator -= .045;
+                }
+                while (_pinchAccumulator <= -.045) {
+                  widget.onPinch(-1);
+                  _pinchAccumulator += .045;
+                }
+              } else {
+                widget.onPan(details.focalPointDelta.dx * 2.0, details.focalPointDelta.dy * 2.0);
+              }
+              _lastScale = details.scale;
+            } : null,
+            onScaleEnd: widget.enabled ? (_) => widget.onEnd() : null,
+            child: CustomPaint(
+              painter: CameraViewfinderPainter(),
+              child: Stack(children: [
+                Positioned(top: 11, left: 11, child: _tag('CAM', green)),
+                Positioned(top: 11, right: 11, child: _tag('2-FINGER ZOOM', accent)),
+                const Center(child: Icon(Icons.center_focus_strong, size: 42, color: Color(0xCCFFFFFF))),
+                const Positioned(bottom: 13, left: 0, right: 0, child: Text('CAMERA CONTROL SURFACE', textAlign: TextAlign.center, style: TextStyle(color: Color(0xAAFFFFFF), fontSize: 8, letterSpacing: 1.8, fontWeight: FontWeight.w800))),
+              ]),
             ),
-          ),
-          child: const Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.threed_rotation, size: 30, color: accent),
-              SizedBox(height: 7),
-              Text('DRAG TO LOOK', style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1, fontSize: 11)),
-              SizedBox(height: 4),
-              Text('RIGHT TOUCHPAD', style: TextStyle(color: muted, fontSize: 9)),
-            ],
           ),
         ),
       ),
     );
   }
+
+  Widget _tag(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(color: Colors.black.withOpacity(.45), borderRadius: BorderRadius.circular(5)),
+      child: Text(text, style: TextStyle(color: color, fontSize: 8, fontWeight: FontWeight.w900, letterSpacing: .8)),
+    );
+  }
+}
+
+class CameraViewfinderPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final background = Paint()..shader = const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [Color(0xFF1B3048), Color(0xFF0B1523), Color(0xFF14243A)],
+    ).createShader(rect);
+    canvas.drawRect(rect, background);
+
+    final grid = Paint()..color = Colors.white.withOpacity(.09)..strokeWidth = 1;
+    for (int i = 1; i < 3; i++) {
+      final x = size.width * i / 3;
+      final y = size.height * i / 3;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), grid);
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
+    }
+
+    final frame = Paint()..color = Colors.white.withOpacity(.2)..style = PaintingStyle.stroke..strokeWidth = 1;
+    canvas.drawRect(Rect.fromLTWH(8, 8, size.width - 16, size.height - 16), frame);
+
+    final center = Offset(size.width / 2, size.height / 2);
+    final reticle = Paint()..color = Colors.white.withOpacity(.7)..style = PaintingStyle.stroke..strokeWidth = 1.2;
+    canvas.drawCircle(center, 22, reticle);
+    canvas.drawLine(Offset(center.dx - 34, center.dy), Offset(center.dx - 13, center.dy), reticle);
+    canvas.drawLine(Offset(center.dx + 13, center.dy), Offset(center.dx + 34, center.dy), reticle);
+    canvas.drawLine(Offset(center.dx, center.dy - 34), Offset(center.dx, center.dy - 13), reticle);
+    canvas.drawLine(Offset(center.dx, center.dy + 13), Offset(center.dx, center.dy + 34), reticle);
+  }
+
+  @override
+  bool shouldRepaint(covariant CameraViewfinderPainter oldDelegate) => false;
 }
 
 class HoldButton extends StatelessWidget {
