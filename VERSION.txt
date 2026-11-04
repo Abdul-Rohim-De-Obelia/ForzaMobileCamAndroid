@@ -1,3 +1,3 @@
-Forza Mobile Cam Stage 2
-Version 0.2.0
-Android Flutter controller source compatible with Stage 1 Windows Bridge.
+Forza Mobile Cam Stage 2.1
+Version 0.2.1+3
+Fix: Android connection form uses a full-screen route, soft keyboard focus, paste token button, and show/hide token control.

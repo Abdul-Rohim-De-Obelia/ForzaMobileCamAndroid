@@ -489,72 +489,22 @@ class _ControllerScreenState extends State<ControllerScreen>
   }
 
   Future<void> _showConnectionDialog() async {
-    final host = TextEditingController(text: _hostController.text);
-    final port = TextEditingController(text: _portController.text);
-    final token = TextEditingController(text: _tokenController.text);
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: panel,
-        title: const Text('Connect to Windows Bridge'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: host,
-                decoration: const InputDecoration(
-                  labelText: 'IP address PC',
-                  hintText: '192.168.1.10',
-                ),
-                keyboardType: TextInputType.url,
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: port,
-                decoration: const InputDecoration(labelText: 'WebSocket port'),
-                keyboardType: TextInputType.number,
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: token,
-                decoration: const InputDecoration(labelText: 'Session token'),
-                obscureText: true,
-                autocorrect: false,
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'IP dan token ditampilkan di jendela Windows Bridge. '
-                'HP dan PC harus berada pada jaringan yang sama.',
-                style: TextStyle(color: muted, fontSize: 12),
-              ),
-            ],
-          ),
+    final result = await Navigator.of(context).push<Map<String, String>>(
+      MaterialPageRoute(
+        builder: (_) => BridgeConnectionPage(
+          initialHost: _hostController.text,
+          initialPort: _portController.text,
+          initialToken: _tokenController.text,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              _hostController.text = host.text.trim();
-              _portController.text = port.text.trim();
-              _tokenController.text = token.text.trim();
-              Navigator.pop(context, true);
-            },
-            child: const Text('Connect'),
-          ),
-        ],
       ),
     );
 
-    if (result == true) await _connect();
-    host.dispose();
-    port.dispose();
-    token.dispose();
+    if (result == null) return;
+
+    _hostController.text = result['host'] ?? '';
+    _portController.text = result['port'] ?? '8765';
+    _tokenController.text = result['token'] ?? '';
+    await _connect();
   }
 
   @override
@@ -1033,6 +983,224 @@ class _ControllerScreenState extends State<ControllerScreen>
           ),
         ),
       ],
+    );
+  }
+}
+
+
+class BridgeConnectionPage extends StatefulWidget {
+  const BridgeConnectionPage({
+    super.key,
+    required this.initialHost,
+    required this.initialPort,
+    required this.initialToken,
+  });
+
+  final String initialHost;
+  final String initialPort;
+  final String initialToken;
+
+  @override
+  State<BridgeConnectionPage> createState() => _BridgeConnectionPageState();
+}
+
+class _BridgeConnectionPageState extends State<BridgeConnectionPage> {
+  late final TextEditingController _host;
+  late final TextEditingController _port;
+  late final TextEditingController _token;
+  final FocusNode _tokenFocus = FocusNode();
+  bool _showToken = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _host = TextEditingController(text: widget.initialHost);
+    _port = TextEditingController(text: widget.initialPort);
+    _token = TextEditingController(text: widget.initialToken);
+
+    // Give Android's soft keyboard a normal, full-screen TextField target.
+    // Autofocus the token because this is the value most users need to paste.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tokenFocus.requestFocus();
+    });
+  }
+
+  Future<void> _pasteToken() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final value = data?.text?.trim();
+    if (value == null || value.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Clipboard tidak berisi teks token.')),
+      );
+      return;
+    }
+    _token.value = TextEditingValue(
+      text: value,
+      selection: TextSelection.collapsed(offset: value.length),
+    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Session token berhasil ditempel.')),
+      );
+    }
+  }
+
+  void _submit() {
+    final host = _host.text.trim();
+    final port = _port.text.trim();
+    final token = _token.text.trim();
+
+    if (host.isEmpty || token.isEmpty || int.tryParse(port) == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('IP PC, port, dan session token wajib diisi.')),
+      );
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+    Navigator.of(context).pop({
+      'host': host,
+      'port': port,
+      'token': token,
+    });
+  }
+
+  @override
+  void dispose() {
+    _host.dispose();
+    _port.dispose();
+    _token.dispose();
+    _tokenFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bg,
+      resizeToAvoidBottomInset: true,
+      appBar: AppBar(
+        backgroundColor: bg,
+        foregroundColor: Colors.white,
+        title: const Text(
+          'CONNECT TO WINDOWS BRIDGE',
+          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight - 36),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.wifi_tethering, size: 42, color: accent),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Hubungkan HP ke Windows Bridge',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Pastikan HP dan PC berada pada jaringan Wi-Fi yang sama. '
+                        'IP dan session token ditampilkan pada jendela Bridge di PC.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: muted, fontSize: 12, height: 1.45),
+                      ),
+                      const SizedBox(height: 22),
+                      TextField(
+                        controller: _host,
+                        keyboardType: TextInputType.text,
+                        textInputAction: TextInputAction.next,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: const InputDecoration(
+                          labelText: 'IP address PC',
+                          hintText: '192.168.1.10',
+                          prefixIcon: Icon(Icons.computer),
+                        ),
+                        onSubmitted: (_) => _tokenFocus.requestFocus(),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _port,
+                        keyboardType: TextInputType.number,
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(
+                          labelText: 'WebSocket port',
+                          hintText: '8765',
+                          prefixIcon: Icon(Icons.lan),
+                        ),
+                        onSubmitted: (_) => _tokenFocus.requestFocus(),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _token,
+                        focusNode: _tokenFocus,
+                        autofocus: false,
+                        keyboardType: TextInputType.text,
+                        textInputAction: TextInputAction.done,
+                        textCapitalization: TextCapitalization.none,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        obscureText: !_showToken,
+                        decoration: InputDecoration(
+                          labelText: 'Session token',
+                          hintText: 'Paste token dari jendela Bridge',
+                          prefixIcon: const Icon(Icons.key),
+                          suffixIcon: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Paste token',
+                                onPressed: _pasteToken,
+                                icon: const Icon(Icons.content_paste),
+                              ),
+                              IconButton(
+                                tooltip: _showToken ? 'Hide token' : 'Show token',
+                                onPressed: () => setState(() => _showToken = !_showToken),
+                                icon: Icon(
+                                  _showToken ? Icons.visibility_off : Icons.visibility,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        onSubmitted: (_) => _submit(),
+                      ),
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        height: 48,
+                        child: FilledButton.icon(
+                          onPressed: _submit,
+                          icon: const Icon(Icons.link),
+                          label: const Text(
+                            'CONNECT',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('CANCEL'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
