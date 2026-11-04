@@ -1,0 +1,65 @@
+FORZA MOBILE CAM — CLOUD BUILD (GITHUB ACTIONS)
+Tujuan: membangun APK Android tanpa memasang Android Studio atau Android SDK di PC.
+
+BAGIAN A — BUAT REPOSITORY GITHUB
+1. Buka https://github.com dan masuk ke akun.
+2. Klik + di kanan atas, pilih New repository.
+3. Repository name: ForzaMobileCamAndroid
+4. Pilih Private agar source code tidak dapat dilihat publik.
+5. Klik Create repository.
+
+BAGIAN B — UPLOAD SOURCE MENGGUNAKAN GITHUB DESKTOP
+1. Instal GitHub Desktop: https://desktop.github.com/
+2. Buka GitHub Desktop dan sign in ke akun GitHub.
+3. Pilih File > Clone repository.
+4. Pilih tab GitHub.com, pilih repository ForzaMobileCamAndroid.
+5. Tentukan Local Path, lalu klik Clone.
+6. Ekstrak ZIP ForzaMobileCam_CloudBuild.zip.
+7. Masuk ke folder hasil ekstrak ForzaMobileCam_Stage2.
+8. Salin SEMUA ISI folder tersebut ke folder repository hasil Clone.
+   Penting: ikut salin folder .github. Folder ini mungkin tersembunyi di Windows.
+   Aktifkan File Explorer > View > Show > Hidden items jika tidak terlihat.
+9. Jika Windows bertanya apakah README boleh diganti, pilih Replace.
+10. Kembali ke GitHub Desktop. Perubahan file akan muncul.
+11. Isi Summary: Add Forza Mobile Cam Android cloud build.
+12. Klik Commit to main.
+13. Klik Push origin.
+
+BAGIAN C — JALANKAN CLOUD BUILD
+1. Buka repository di https://github.com.
+2. Klik tab Actions.
+3. Pilih workflow "Build Forza Mobile Cam Android APK".
+4. Jika diminta, klik enable workflows.
+5. Workflow berjalan otomatis setelah Push. Tunggu proses selesai.
+6. Klik run terbaru.
+7. Tunggu sampai status Success.
+
+BAGIAN D — DOWNLOAD APK
+1. Buka halaman run yang berstatus Success.
+2. Gulir ke bagian Artifacts.
+3. Klik ForzaMobileCam-Android-APK.
+4. Ekstrak ZIP artifact yang terunduh.
+5. Ambil app-release.apk.
+6. Kirim APK ke HP dan instal.
+7. Jika Android menolak instalasi, izinkan Install unknown apps untuk File Manager
+   atau browser yang digunakan membuka APK.
+
+UPDATE BERIKUTNYA
+Setelah source diperbarui, lakukan Commit to main lalu Push origin di GitHub Desktop.
+GitHub Actions akan membangun APK baru secara otomatis.
+
+TROUBLESHOOTING
+- Workflow tidak muncul: pastikan file berada di root repository pada
+  .github/workflows/build-android.yml.
+- Jangan sampai foldernya bersarang menjadi
+  ForzaMobileCam_Stage2/ForzaMobileCam_Stage2/.github/...
+- Build gagal: buka run, pilih langkah yang merah, lalu salin pesan error lengkap.
+- Artifact tidak muncul: pastikan job sukses dan Upload APK artifact berstatus hijau.
+- APK tidak terhubung: pastikan Windows Bridge berjalan, IP PC benar, port 8765,
+  token sesi terbaru, dan HP/PC pada Wi-Fi yang sama.
+
+KEAMANAN
+- Jangan simpan session token Windows Bridge di GitHub.
+- Jangan unggah password atau secret pribadi.
+- Gunakan repository Private.
+- Workflow hanya membangun APK; tidak mengakses atau mengubah file game.

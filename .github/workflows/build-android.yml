@@ -1,0 +1,62 @@
+name: Build Forza Mobile Cam Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show tool versions
+        run: |
+          flutter --version
+          java -version
+
+      - name: Generate Android project and copy app source
+        shell: bash
+        run: |
+          flutter create --platforms=android --org com.forzamobilecam --project-name forza_mobile_cam build_app
+
+          cp source/pubspec.yaml build_app/pubspec.yaml
+          cp source/lib/main.dart build_app/lib/main.dart
+          cp source/android/app/src/main/AndroidManifest.xml build_app/android/app/src/main/AndroidManifest.xml
+
+      - name: Resolve Flutter packages
+        working-directory: build_app
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: build_app
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ForzaMobileCam-Android-APK
+          path: build_app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
